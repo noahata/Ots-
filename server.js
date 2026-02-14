@@ -147,7 +147,7 @@ bot.on('message', async (msg) => {
 ━━━━━━━━━━━━━━━━━━━
 📞 For account verification and security`;
     
-    return bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    return bot.sendMessage(chatId,  'please enter correctly' );
   }
   
   // ========== STEP 4: PHONE ==========
