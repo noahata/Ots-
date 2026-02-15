@@ -33,7 +33,7 @@ bot.onText(/\/start/, async (msg) => {
   };
 
   await bot.sendMessage(chatId,
-`👋 *Welcome to DoctorET Registration Bot*
+`👋 Welcome to OTS Registration Bot*
 
 We are pleased to have you join our teaching platform.
 
