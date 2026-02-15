@@ -1,11 +1,12 @@
 {
   "name": "ots-teacher-bot",
   "version": "1.0.0",
-  "description": "Telegram bot for teacher registration with Chapa payment integration",
+  "description": "Telegram bot for teacher registration",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "install-clean": "rm -rf node_modules package-lock.json && npm install"
   },
   "dependencies": {
     "axios": "^1.6.2",
