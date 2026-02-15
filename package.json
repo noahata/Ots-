@@ -1,22 +1,12 @@
 {
-  "name": "ots-teacher-registration-bot",
+  "name": "ots-teacher-bot",
   "version": "1.0.0",
-  "description": "Telegram bot for OTS Teacher Registration System with Chapa payment integration",
+  "description": "Telegram bot for teacher registration with Chapa payment integration",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "nodemon index.js"
   },
-  "keywords": [
-    "telegram-bot",
-    "teacher-registration",
-    "chapa-payment",
-    "ots",
-    "education"
-  ],
-  "author": "OTS Development Team",
-  "license": "MIT",
   "dependencies": {
     "axios": "^1.6.2",
     "dotenv": "^16.3.1",
