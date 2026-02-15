@@ -4,8 +4,8 @@
   "description": "Telegram bot for OTS Teacher Registration System with Chapa payment integration",
   "main": "index.js",
   "scripts": {
-    "start": "server.js",
-    "dev": "nodemon server.js",
+    "start": "node index.js",
+    "dev": "nodemon index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
@@ -29,4 +29,4 @@
   "engines": {
     "node": ">=18.0.0"
   }
-  
+}
