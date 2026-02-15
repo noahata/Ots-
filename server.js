@@ -2,352 +2,273 @@ require("dotenv").config();
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
 const axios = require("axios");
-const crypto = require("crypto");
 
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const CHANNEL_ID = process.env.CHANNEL_ID;
-const CHAPA_SECRET = process.env.CHAPA_SECRET_KEY;
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+const ADMIN_ID = Number(process.env.ADMIN_ID);
+const DB_CHANNEL = process.env.DB_CHANNEL_ID;
 
-const users = {};
-const channelMessageMap = {};
+const PRICING = {
+  STANDARD: 99,
+  PENALTY: 149
+};
+
+let users = {};
+let teacherCounter = 0;
+let processedTransactions = new Set();
 
 /* ================= SERVER ================= */
 
-app.get("/", (req, res) => res.send("✅ Bot Running"));
-app.listen(PORT, () => console.log("🚀 Server running on " + PORT));
-
-/* ================= KEYBOARDS ================= */
-
-function mainMenu(user) {
-  return {
-    inline_keyboard: [
-      [{ text: "📝 Register", callback_data: "register" }],
-      [{ text: "📊 Check Status", callback_data: "status" }],
-      user?.status === "approved"
-        ? [{ text: "💰 Pay Now", callback_data: "pay" }]
-        : [],
-      [{ text: "🔄 Restart", callback_data: "restart" }]
-    ].filter(row => row.length > 0)
-  };
-}
-
-function backKeyboard() {
-  return {
-    keyboard: [["⬅️ BACK"]],
-    resize_keyboard: true
-  };
-}
-
-/* ================= START ================= */
-
-bot.onText(/\/start/, async (msg) => {
-  if (msg.chat.type !== "private") return;
-
-  const user = users[msg.chat.id];
-
-  await bot.sendMessage(
-    msg.chat.id,
-    "🌟 *Welcome to the Platform!* 🚀",
-    {
-      parse_mode: "Markdown",
-      reply_markup: mainMenu(user)
-    }
-  );
+app.get("/", (req, res) => {
+  res.send("✅ Teacher Verification Bot Running");
 });
 
-/* ================= MESSAGE HANDLER ================= */
+app.listen(process.env.PORT || 3000, () => {
+  console.log("🚀 Server Running...");
+});
 
-bot.on("message", async (msg) => {
-  if (!msg.text) return;
+/* ================= UTIL ================= */
 
-  const chatId = msg.chat.id;
-  const text = msg.text;
+function generateTeacherId() {
+  teacherCounter++;
+  const year = new Date().getFullYear();
+  return `TCH-${year}-${String(teacherCounter).padStart(4, "0")}`;
+}
 
-  /* ===== CHANNEL REPLY FORWARD ===== */
-  if (msg.chat.type === "channel" && msg.reply_to_message) {
-    const targetUserId =
-      channelMessageMap[msg.reply_to_message.message_id];
+function getFee(user) {
+  const now = Date.now();
+  const hours = (now - user.createdAt) / (1000 * 60 * 60);
 
-    if (targetUserId) {
-      await bot.sendMessage(
-        targetUserId,
-        `📩 *Admin Reply:*\n\n${text}`,
-        { parse_mode: "Markdown" }
-      );
+  if (user.status === "reapply_required") {
+    user.penalty_applied = true;
+    return PRICING.PENALTY;
+  }
+
+  if (user.status === "pending_payment" && hours > 24) {
+    user.penalty_applied = true;
+    return PRICING.PENALTY;
+  }
+
+  user.penalty_applied = false;
+  return PRICING.STANDARD;
+}
+
+async function createPayment(user, amount) {
+  const tx_ref = "tx_" + Date.now() + "_" + user.telegram_id;
+
+  const response = await axios.post(
+    "https://api.chapa.co/v1/transaction/initialize",
+    {
+      amount,
+      currency: "ETB",
+      email: user.email,
+      first_name: user.full_name,
+      phone_number: user.phone,
+      tx_ref,
+      callback_url: `${process.env.BASE_URL}/verify`,
+      return_url: `https://t.me/`,
+      customization: {
+        title: "Teacher Registration",
+        description: "Instructor Verification Fee"
+      }
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}`
+      }
     }
-    return;
-  }
+  );
 
-  if (msg.chat.type !== "private") return;
+  return response.data.data.checkout_url;
+}
 
-  if (!users[chatId]) users[chatId] = { step: 0 };
-  const user = users[chatId];
+/* ================= WEBHOOK ================= */
 
-  /* ===== BACK BUTTON ===== */
-  if (text === "⬅️ BACK") {
-    user.step--;
-    if (user.step < 1) {
-      user.step = 0;
-      return bot.sendMessage(chatId, "🔙 Back to menu", {
-        reply_markup: mainMenu(user)
-      });
+app.post("/verify", async (req, res) => {
+  try {
+    const { tx_ref } = req.body;
+    if (!tx_ref) return res.sendStatus(400);
+
+    // Duplicate protection
+    if (processedTransactions.has(tx_ref)) {
+      console.log("⚠ Duplicate tx ignored:", tx_ref);
+      return res.sendStatus(200);
     }
-  }
 
-  /* ===== REGISTRATION STEPS ===== */
-
-  if (user.step === 1) {
-    user.fullName = text;
-    user.step = 2;
-    return bot.sendMessage(chatId, "📧 Enter Email:", {
-      reply_markup: backKeyboard()
-    });
-  }
-
-  if (user.step === 2) {
-    if (!text.includes("@"))
-      return bot.sendMessage(chatId, "❌ Invalid Email");
-    user.email = text;
-    user.step = 3;
-    return bot.sendMessage(chatId, "📱 Enter Phone:", {
-      reply_markup: backKeyboard()
-    });
-  }
-
-  if (user.step === 3) {
-    user.phone = text;
-    user.step = 4;
-    return bot.sendMessage(chatId, "🐦 Enter Username:", {
-      reply_markup: backKeyboard()
-    });
-  }
-
-  if (user.step === 4) {
-    user.username = text.replace("@", "");
-    user.step = 5;
-    return bot.sendMessage(chatId, "👥 Enter Subscribers:", {
-      reply_markup: backKeyboard()
-    });
-  }
-
-  if (user.step === 5) {
-    user.subscribers = text;
-    user.step = 6;
-    return bot.sendMessage(chatId, "🔗 Enter Channel Link:", {
-      reply_markup: backKeyboard()
-    });
-  }
-
-  if (user.step === 6) {
-    user.channelLink = text;
-    user.status = "pending";
-    user.step = 0;
-
-    const sent = await bot.sendMessage(
-      CHANNEL_ID,
-      `📥 *NEW REQUEST*
-
-👤 ${user.fullName}
-📧 ${user.email}
-📱 ${user.phone}
-🐦 @${user.username}
-👥 ${user.subscribers}
-🔗 ${user.channelLink}
-
-🆔 ${chatId}
-
-⏳ Pending Approval`,
+    const verify = await axios.get(
+      `https://api.chapa.co/v1/transaction/verify/${tx_ref}`,
       {
-        parse_mode: "Markdown",
+        headers: {
+          Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}`
+        }
+      }
+    );
+
+    const data = verify.data.data;
+
+    if (data.status !== "success") {
+      return res.sendStatus(200);
+    }
+
+    const telegramId = Number(tx_ref.split("_")[2]);
+    const user = users[telegramId];
+    if (!user) return res.sendStatus(200);
+
+    // Prevent double processing
+    if (user.status === "payment_verified" || user.status === "approved") {
+      return res.sendStatus(200);
+    }
+
+    processedTransactions.add(tx_ref);
+
+    user.status = "payment_verified";
+    user.payment_tx = tx_ref;
+    user.paid_amount = data.amount;
+    user.paid_at = new Date().toISOString();
+
+    await bot.sendMessage(
+      telegramId,
+      "✅ Payment Verified!\nYour application is now under review."
+    );
+
+    await bot.sendMessage(
+      DB_CHANNEL,
+      `📌 Payment Verified\nUser: ${telegramId}\nAmount: ${data.amount}\nPenalty: ${user.penalty_applied ? "Yes" : "No"}`
+    );
+
+    await bot.sendMessage(DB_CHANNEL,
+      "Approve or Reject?",
+      {
         reply_markup: {
           inline_keyboard: [
             [
-              { text: "✅ APPROVE", callback_data: `approve_${chatId}` },
-              { text: "❌ REJECT", callback_data: `reject_${chatId}` }
-            ],
-            [
-              { text: "📨 Ask Payment", callback_data: `askpay_${chatId}` },
-              { text: "📋 Need Info", callback_data: `needinfo_${chatId}` }
-            ],
-            [
-              { text: "⚠️ Invalid", callback_data: `invalid_${chatId}` }
+              { text: "✅ Approve", callback_data: `approve_${telegramId}` },
+              { text: "❌ Reject", callback_data: `reject_${telegramId}` }
             ]
           ]
         }
       }
     );
 
-    channelMessageMap[sent.message_id] = chatId;
-
-    return bot.sendMessage(chatId, "⏳ Waiting for admin approval...");
-  }
-});
-
-/* ================= CALLBACK HANDLER ================= */
-
-bot.on("callback_query", async (query) => {
-  const data = query.data;
-  const chatId = query.message.chat.id;
-
-  /* ===== MAIN MENU ===== */
-
-  if (data === "register") {
-    users[chatId] = { step: 1 };
-    await bot.sendMessage(chatId, "👤 Enter Full Name:", {
-      reply_markup: backKeyboard()
-    });
-    return bot.answerCallbackQuery(query.id);
-  }
-
-  if (data === "status") {
-    const user = users[chatId];
-    const statusEmoji =
-      user?.status === "approved" ? "✅" :
-      user?.status === "rejected" ? "❌" : "⏳";
-
-    await bot.sendMessage(
-      chatId,
-      `📊 Status: ${statusEmoji} ${user?.status || "pending"}`
-    );
-
-    return bot.answerCallbackQuery(query.id);
-  }
-
-  if (data === "restart") {
-    users[chatId] = { step: 0 };
-    await bot.sendMessage(chatId, "🔄 Restarted", {
-      reply_markup: mainMenu(users[chatId])
-    });
-    return bot.answerCallbackQuery(query.id);
-  }
-
-  if (data === "pay") {
-    bot.emit("message", {
-      chat: { id: chatId, type: "private" },
-      text: "💰 PROCEED TO PAYMENT"
-    });
-    return bot.answerCallbackQuery(query.id);
-  }
-
-  /* ===== CHANNEL BUTTONS ===== */
-
-  const [action, userId] = data.split("_");
-
-  if (!users[userId]) return;
-
-  if (action === "approve") {
-    users[userId].status = "approved";
-    users[userId].approvedAt = Date.now();
-    await bot.sendMessage(userId, "✅ Approved!");
-  }
-
-  if (action === "reject") {
-    users[userId].status = "rejected";
-    await bot.sendMessage(userId, "❌ Rejected.");
-  }
-
-  if (action === "askpay") {
-    await bot.sendMessage(userId, "💰 Please proceed to payment.");
-  }
-
-  if (action === "needinfo") {
-    await bot.sendMessage(userId, "📋 Admin needs more information.");
-  }
-
-  if (action === "invalid") {
-    users[userId].status = "rejected";
-    await bot.sendMessage(userId, "⚠️ Invalid details. Register again.");
-  }
-
-  bot.answerCallbackQuery(query.id);
-});
-
-/* ================= PAYMENT ================= */
-
-bot.on("message", async (msg) => {
-  if (msg.text !== "💰 PROCEED TO PAYMENT") return;
-
-  const user = users[msg.chat.id];
-  if (!user || user.status !== "approved")
-    return bot.sendMessage(msg.chat.id, "❌ Not approved yet.");
-
-  if (user.paymentStatus === "paid")
-    return bot.sendMessage(msg.chat.id, "✅ Already paid.");
-
-  const approvedTime = new Date(user.approvedAt || Date.now());
-  const hoursPassed = (Date.now() - approvedTime) / (1000 * 60 * 60);
-  let amount = hoursPassed >= 24 ? 150 : 100;
-
-  const tx_ref = `tx-${msg.chat.id}-${Date.now()}`;
-  user.tx_ref = tx_ref;
-  user.paymentStatus = "pending";
-
-  try {
-    const response = await axios.post(
-      "https://api.chapa.co/v1/transaction/initialize",
-      {
-        amount: amount.toString(),
-        currency: "ETB",
-        email: user.email,
-        first_name: user.fullName,
-        tx_ref,
-        callback_url: `https://${process.env.RENDER_EXTERNAL_URL}/verify`
-      },
-      {
-        headers: { Authorization: `Bearer ${CHAPA_SECRET}` }
-      }
-    );
-
-    await bot.sendMessage(
-      msg.chat.id,
-      `💰 Amount: ${amount} ETB\n\n${response.data.data.checkout_url}`
-    );
-
-  } catch {
-    await bot.sendMessage(msg.chat.id, "❌ Payment error.");
-  }
-});
-
-/* ================= SECURE VERIFY ================= */
-
-app.post("/verify", async (req, res) => {
-  try {
-    const signature = req.headers["chapa-signature"];
-    const payload = JSON.stringify(req.body);
-
-    const hash = crypto
-      .createHmac("sha256", CHAPA_SECRET)
-      .update(payload)
-      .digest("hex");
-
-    if (hash !== signature) return res.sendStatus(401);
-
-    const tx_ref = req.body.tx_ref;
-    const userId = Object.keys(users).find(
-      id => users[id]?.tx_ref === tx_ref
-    );
-
-    if (userId) {
-      users[userId].paymentStatus = "paid";
-      users[userId].tx_ref = null;
-
-      await bot.sendMessage(userId, "🎉 Payment Confirmed!");
-      await bot.sendMessage(
-        CHANNEL_ID,
-        `💎 New Paid User: ${users[userId].fullName}`
-      );
-    }
-
     res.sendStatus(200);
-  } catch {
+
+  } catch (err) {
+    console.log("Webhook Error:", err.message);
     res.sendStatus(500);
   }
 });
 
-console.log("🔥 FULL BOT SYSTEM ACTIVE");
+/* ================= START ================= */
+
+bot.onText(/\/start/, (msg) => {
+  const chatId = msg.chat.id;
+
+  users[chatId] = {
+    telegram_id: chatId,
+    status: "collecting",
+    step: 1,
+    createdAt: Date.now()
+  };
+
+  bot.sendMessage(chatId,
+    "🎓 *Instructor Verification Gateway*\n\nEnter Full Name:",
+    { parse_mode: "Markdown" }
+  );
+});
+
+/* ================= REGISTRATION FLOW ================= */
+
+bot.on("message", async (msg) => {
+  const chatId = msg.chat.id;
+  const user = users[chatId];
+  if (!user || !msg.text) return;
+
+  if (user.step === 1) {
+    user.full_name = msg.text;
+    user.step = 2;
+    return bot.sendMessage(chatId, "📧 Enter Email:");
+  }
+
+  if (user.step === 2) {
+    user.email = msg.text;
+    user.step = 3;
+    return bot.sendMessage(chatId, "📱 Enter Phone:");
+  }
+
+  if (user.step === 3) {
+    user.phone = msg.text;
+    user.status = "pending_payment";
+    user.step = 0;
+
+    const fee = getFee(user);
+    const link = await createPayment(user, fee);
+
+    return bot.sendMessage(chatId,
+      `💳 Registration Fee: ${fee} ETB`,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: `💳 Pay ${fee} ETB`, url: link }]
+          ]
+        }
+      }
+    );
+  }
+});
+
+/* ================= ADMIN ACTION ================= */
+
+bot.on("callback_query", async (q) => {
+  if (q.from.id !== ADMIN_ID) return;
+
+  const telegramId = Number(q.data.split("_")[1]);
+  const user = users[telegramId];
+  if (!user) return;
+
+  if (q.data.startsWith("approve_")) {
+    const teacherId = generateTeacherId();
+    user.status = "approved";
+    user.teacher_id = teacherId;
+
+    await bot.sendMessage(
+      telegramId,
+      `🎉 Approved!\n\nYour Teacher ID: ${teacherId}\nYou can now use /dashboard`
+    );
+
+    bot.editMessageText("✅ Approved", {
+      chat_id: q.message.chat.id,
+      message_id: q.message.message_id
+    });
+  }
+
+  if (q.data.startsWith("reject_")) {
+    user.status = "reapply_required";
+
+    await bot.sendMessage(
+      telegramId,
+      "❌ Application rejected.\nReapply with 149 ETB."
+    );
+
+    bot.editMessageText("❌ Rejected", {
+      chat_id: q.message.chat.id,
+      message_id: q.message.message_id
+    });
+  }
+});
+
+/* ================= DASHBOARD ================= */
+
+bot.onText(/\/dashboard/, (msg) => {
+  const user = users[msg.chat.id];
+
+  if (!user || user.status !== "approved") {
+    return bot.sendMessage(msg.chat.id, "🚫 Access Restricted.");
+  }
+
+  bot.sendMessage(msg.chat.id,
+    `📊 Dashboard\n\nID: ${user.teacher_id}\nStatus: Active`
+  );
+});
