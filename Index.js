@@ -12,12 +12,14 @@ const requiredEnv = [
   'WEBHOOK_URL'
 ];
 
+console.log("🔍 Checking environment variables...");
 requiredEnv.forEach(varName => {
   if (!process.env[varName]) {
     console.error(`❌ Missing required environment variable: ${varName}`);
     process.exit(1);
   }
 });
+console.log("✅ All environment variables found");
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 const app = express();
@@ -30,7 +32,7 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const PRICING = { STANDARD: 99, PENALTY: 149 };
 const TEACHER_PERCENT = 0.55;
 
-// In-memory storage (consider using a database for production)
+// In-memory storage
 let users = {};
 let processedTransactions = new Set();
 let adminReplyTarget = null;
@@ -79,7 +81,7 @@ function isValidEmail(email) {
 }
 
 function isValidPhone(phone) {
-  // Ethiopian phone number validation (simple)
+  // Ethiopian phone number validation
   const phoneRegex = /^(\+251|0)?9\d{8}$/;
   return phoneRegex.test(phone.replace(/\s/g, ''));
 }
@@ -181,7 +183,7 @@ bot.on("message", async (msg) => {
 
   // REGISTER BUTTON
   if (text === "📝 Register") {
-    if (user.status === "pending_review" || user.status === "approved") {
+    if (user.status === "pending_review" || user.status === "approved" || user.status === "payment_verified") {
       return bot.sendMessage(chatId, 
         "⚠️ You already have a registration in progress. Please wait for admin review.");
     }
@@ -483,6 +485,82 @@ bot.on("callback_query", async (query) => {
   const chatId = query.message.chat.id;
   const messageId = query.message.message_id;
 
+  // Handle payment callback first
+  if (query.data === "pay_now") {
+    const userId = query.from.id;
+    const user = users[userId];
+    
+    if (!user || user.status !== "approved") {
+      await bot.answerCallbackQuery(query.id, { 
+        text: "❌ Invalid payment request or registration not approved", 
+        show_alert: true 
+      });
+      return;
+    }
+
+    const amount = getFee(user);
+    const tx_ref = `tx-${Date.now()}-${userId}`;
+    
+    // Store transaction reference
+    user.tx_ref = tx_ref;
+    
+    // Create Chapa payment link
+    const paymentData = {
+      amount: amount,
+      currency: "ETB",
+      email: user.email !== "Not provided" ? user.email : "customer@example.com",
+      first_name: user.name.split(' ')[0],
+      last_name: user.name.split(' ').slice(1).join(' ') || "Teacher",
+      tx_ref: tx_ref,
+      callback_url: `${WEBHOOK_URL}/verify`,
+      return_url: `${WEBHOOK_URL}/success`,
+      customization: {
+        title: "OTS Teacher Registration",
+        description: `Registration fee for ${user.name}`
+      }
+    };
+
+    try {
+      // Create payment link via Chapa API
+      const response = await axios.post(
+        "https://api.chapa.co/v1/transaction/initialize",
+        paymentData,
+        { headers: { Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}` } }
+      );
+
+      if (response.data.status === "success") {
+        const paymentLink = response.data.data.checkout_url;
+        
+        await bot.sendMessage(userId,
+`🔗 *Complete Your Payment*
+
+Click the link below to pay *${amount} ETB* securely via Chapa:
+
+[💳 Pay Now](${paymentLink})
+
+*After Payment:*
+Your account will be automatically activated once payment is confirmed.
+
+⏱️ *Payment window:* 24 hours`,
+{
+  parse_mode: "Markdown",
+  disable_web_page_preview: true
+});
+
+        await bot.answerCallbackQuery(query.id, { text: "Payment link generated" });
+      } else {
+        throw new Error("Failed to create payment link");
+      }
+    } catch (error) {
+      console.error("Chapa API error:", error.message);
+      await bot.sendMessage(userId,
+"❌ Sorry, there was an error generating the payment link. Please try again later or contact support.");
+      await bot.answerCallbackQuery(query.id, { text: "Payment failed", show_alert: true });
+    }
+    return;
+  }
+
+  // Admin callbacks
   if (query.from.id === ADMIN_ID) {
     const data = query.data;
     const targetId = Number(data.split("_")[1]);
@@ -561,87 +639,11 @@ You may reapply with updated information using /start.
 Common reasons for rejection:
 • Invalid YouTube channel
 • Incomplete information
-• Unable to verify identity`,
+• Unable to verify identity",
 { parse_mode: "Markdown" });
     }
   } else {
     await bot.answerCallbackQuery(query.id, { text: "Unauthorized", show_alert: true });
-  }
-});
-
-// ================= PAYMENT HANDLER =================
-bot.on("callback_query", async (query) => {
-  if (query.data === "pay_now") {
-    const userId = query.from.id;
-    const user = users[userId];
-    
-    if (!user || user.status !== "approved") {
-      await bot.answerCallbackQuery(query.id, { 
-        text: "❌ Invalid payment request or registration not approved", 
-        show_alert: true 
-      });
-      return;
-    }
-
-    const amount = getFee(user);
-    const tx_ref = `tx-${Date.now()}-${userId}`;
-    
-    // Store transaction reference
-    user.tx_ref = tx_ref;
-    
-    // Create Chapa payment link
-    const paymentData = {
-      amount: amount,
-      currency: "ETB",
-      email: user.email !== "Not provided" ? user.email : "customer@example.com",
-      first_name: user.name.split(' ')[0],
-      last_name: user.name.split(' ').slice(1).join(' ') || "Teacher",
-      tx_ref: tx_ref,
-      callback_url: `${WEBHOOK_URL}/verify`,
-      return_url: `${WEBHOOK_URL}/success`,
-      customization: {
-        title: "OTS Teacher Registration",
-        description: `Registration fee for ${user.name}`
-      }
-    };
-
-    try {
-      // Create payment link via Chapa API
-      const response = await axios.post(
-        "https://api.chapa.co/v1/transaction/initialize",
-        paymentData,
-        { headers: { Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}` } }
-      );
-
-      if (response.data.status === "success") {
-        const paymentLink = response.data.data.checkout_url;
-        
-        await bot.sendMessage(userId,
-`🔗 *Complete Your Payment*
-
-Click the link below to pay *${amount} ETB* securely via Chapa:
-
-[💳 Pay Now](${paymentLink})
-
-*After Payment:*
-Your account will be automatically activated once payment is confirmed.
-
-⏱️ *Payment window:* 24 hours`,
-{
-  parse_mode: "Markdown",
-  disable_web_page_preview: true
-});
-
-        await bot.answerCallbackQuery(query.id, { text: "Payment link generated" });
-      } else {
-        throw new Error("Failed to create payment link");
-      }
-    } catch (error) {
-      console.error("Chapa API error:", error.message);
-      await bot.sendMessage(userId,
-"❌ Sorry, there was an error generating the payment link. Please try again later or contact support.");
-      await bot.answerCallbackQuery(query.id, { text: "Payment failed", show_alert: true });
-    }
   }
 });
 
@@ -710,7 +712,4 @@ Teacher: ${user.name}
 Amount: ${data.amount} ETB
 Transaction: ${tx_ref}
 
-Status: Payment verified`,
-{ parse_mode: "Markdown" });
-
-  
+Statu
