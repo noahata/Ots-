@@ -10,75 +10,107 @@ app.use(express.json());
 const ADMIN_ID = Number(process.env.ADMIN_ID);
 const DB_CHANNEL = process.env.DB_CHANNEL_ID;
 
-const PRICING = {
-  STANDARD: 99,
-  PENALTY: 149
-};
+const PRICING = { STANDARD: 99, PENALTY: 149 };
+const TEACHER_PERCENT = 0.55;
 
 let users = {};
 let processedTransactions = new Set();
-let adminReplyTargets = {};
+let adminReplyTarget = null;
 
-
-// ================= START COMMAND =================
+// ================= START =================
 
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
 
   users[chatId] = {
-    step: "name",
-    createdAt: Date.now(),
-    status: "collecting",
-    penalty_applied: false
+    step: null,
+    status: "idle",
+    createdAt: Date.now()
   };
 
   await bot.sendMessage(chatId,
-`👋 Welcome to OTS Registration Bot*
+`👋 Welcome to *OTS Teacher Registration System*
 
-We are pleased to have you join our teaching platform.
+Welcome to the professional OTS teaching platform.  
 
-Please enter your full legal name to begin registration.`,
-{ parse_mode: "Markdown" });
+Through this system, you can securely register and activate your teaching profile.  
+
+Please select an option below to begin.`,
+{
+  parse_mode: "Markdown",
+  reply_markup: {
+    keyboard: [
+      ["📝 Register"],
+      ["📊 My Status", "ℹ️ About Platform"]
+    ],
+    resize_keyboard: true
+  }
+});
 });
 
-
-// ================= MAIN MESSAGE HANDLER =================
+// ================= MESSAGE HANDLER =================
 
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
+  const text = msg.text;
   const user = users[chatId];
 
-  // Admin reply system
-  if (msg.from.id === ADMIN_ID && adminReplyTargets[ADMIN_ID]) {
-    const target = adminReplyTargets[ADMIN_ID];
+  // ADMIN REPLY MODE
+  if (msg.from.id === ADMIN_ID && adminReplyTarget) {
+    await bot.sendMessage(adminReplyTarget,
+`📩 *Message from OTS Administration*
 
-    await bot.sendMessage(target,
-`📩 *Message from Administration*
-
-${msg.text}`,
+${text}`,
 { parse_mode: "Markdown" });
 
-    await bot.sendMessage(ADMIN_ID, "✅ Message delivered successfully.");
-    delete adminReplyTargets[ADMIN_ID];
+    await bot.sendMessage(ADMIN_ID, "✅ Reply delivered successfully.");
+    adminReplyTarget = null;
     return;
   }
 
   if (!user) return;
 
-  // ===== NAME STEP =====
+  // REGISTER BUTTON
+  if (text === "📝 Register") {
+    user.step = "name";
+    user.status = "collecting";
+    user.createdAt = Date.now();
+
+    return bot.sendMessage(chatId,
+`📝 *Step 1 of 3 – Personal Information*
+
+Please enter your full legal name as it appears on official documents.
+
+This ensures accurate profile verification.`,
+{
+  parse_mode: "Markdown",
+  reply_markup: {
+    keyboard: [["⬅️ Back"]],
+    resize_keyboard: true
+  }
+});
+  }
+
+  // NAME STEP
   if (user.step === "name") {
-    user.name = msg.text;
+    if (text === "⬅️ Back")
+      return bot.sendMessage(chatId, "You are currently at the first step.");
+
+    user.name = text;
     user.step = "phone";
 
     return bot.sendMessage(chatId,
-`📱 *Phone Verification Required*
+`📱 *Step 2 of 3 – Phone Verification*
 
-For security purposes, please share your phone number using the button below.`,
+For security, communication, and payment validation, we require your verified phone number.
+
+Please use the secure button below to share your contact.`,
 {
   parse_mode: "Markdown",
   reply_markup: {
     keyboard: [
-      [{ text: "📲 Share Phone Number", request_contact: true }]
+      [{ text: "📲 Share Phone Number", request_contact: true }],
+      ["⬅️ Back"]
     ],
     resize_keyboard: true,
     one_time_keyboard: true
@@ -86,63 +118,114 @@ For security purposes, please share your phone number using the button below.`,
 });
   }
 
-  // ===== PHONE STEP =====
+  // PHONE STEP
   if (user.step === "phone") {
-
-    if (!msg.contact) {
+    if (text === "⬅️ Back") {
+      user.step = "name";
       return bot.sendMessage(chatId,
-"⚠ Please use the provided button to share your phone number.");
+"⬅️ Returning to previous step.\n\nPlease re-enter your full name:",
+{
+  reply_markup: { keyboard: [["⬅️ Back"]], resize_keyboard: true }
+});
     }
+
+    if (!msg.contact)
+      return bot.sendMessage(chatId,
+"⚠ Please use the secure contact sharing button.");
 
     user.phone = msg.contact.phone_number;
     user.step = "subject";
 
     return bot.sendMessage(chatId,
-`📚 *Subject Information*
+`📚 *Step 3 of 3 – Teaching Subject*
 
-Please enter the subject you wish to teach.`,
+Please enter the subject you specialize in teaching.
+
+Example:
+• Mathematics
+• English
+• Physics
+• Biology`,
 {
   parse_mode: "Markdown",
-  reply_markup: { remove_keyboard: true }
+  reply_markup: {
+    keyboard: [["⬅️ Back"]],
+    resize_keyboard: true
+  }
 });
   }
 
-  // ===== SUBJECT STEP =====
+  // SUBJECT STEP
   if (user.step === "subject") {
-    user.subject = msg.text;
+    if (text === "⬅️ Back") {
+      user.step = "phone";
+      return bot.sendMessage(chatId,
+"⬅️ Returning to phone verification step.",
+{
+  reply_markup: {
+    keyboard: [
+      [{ text: "📲 Share Phone Number", request_contact: true }],
+      ["⬅️ Back"]
+    ],
+    resize_keyboard: true
+  }
+});
+    }
+
+    user.subject = text;
     user.step = "payment";
 
     const fee = getFee(user);
 
     return bot.sendMessage(chatId,
-`💳 *Registration Fee*
+`💳 *Final Step – Registration Fee*
 
-Amount to Pay: ${fee} ETB
+To activate your teaching profile on OTS, a one-time registration fee is required.
 
-Click below to proceed securely.`,
+Standard Fee: 99 ETB  
+Late Re-application Fee: 149 ETB (if applicable)
+
+Your payable amount: *${fee} ETB*
+
+Click the secure payment button below to proceed via Chapa.`,
 {
   parse_mode: "Markdown",
   reply_markup: {
     inline_keyboard: [
-      [{ text: "💰 Pay Now", callback_data: "pay_now" }]
+      [{ text: "💳 Pay Securely via Chapa", callback_data: "pay_now" }]
     ]
   }
 });
   }
+
+  // STATUS BUTTON
+  if (text === "📊 My Status") {
+    return bot.sendMessage(chatId,
+`📄 *Your Current Registration Status*
+
+Status: ${user.status}
+
+If payment is completed, verification will be processed automatically.`,
+{ parse_mode: "Markdown" });
+  }
+
+  if (text === "ℹ️ About Platform") {
+    return bot.sendMessage(chatId,
+"OTS connects qualified teachers with students in a secure and professional platform across Ethiopia.",
+{ parse_mode: "Markdown" });
+  }
+
 });
 
-
-// ================= PAYMENT BUTTON =================
+// ================= PAYMENT INLINE BUTTON =================
 
 bot.on("callback_query", async (query) => {
   const chatId = query.message.chat.id;
   const user = users[chatId];
-  const data = query.data;
 
-  if (data === "pay_now") {
-
+  if (query.data === "pay_now") {
     const fee = getFee(user);
-    const tx_ref = `docoret_${Date.now()}_${chatId}`;
+    const tx_ref = `ots_${Date.now()}_${chatId}`;
 
     try {
       const response = await axios.post(
@@ -150,7 +233,7 @@ bot.on("callback_query", async (query) => {
         {
           amount: fee,
           currency: "ETB",
-          email: `${chatId}@docoret.com`,
+          email: `${chatId}@ots.com`,
           tx_ref,
           callback_url: `${process.env.BASE_URL}/verify`
         },
@@ -161,126 +244,113 @@ bot.on("callback_query", async (query) => {
         }
       );
 
-      const checkout = response.data.data.checkout_url;
-
       user.status = "pending_payment";
 
       await bot.sendMessage(chatId,
-`🔐 Click below to complete payment securely:
+`🔐 *Secure Payment Link Generated*
 
-${checkout}`);
+Please complete your payment using the Chapa checkout link below:
+
+${response.data.data.checkout_url}
+
+Payment verification will be processed automatically.`,
+{
+  parse_mode: "Markdown",
+  reply_markup: { remove_keyboard: true }
+});
 
     } catch (err) {
-      console.log(err.message);
-      await bot.sendMessage(chatId, "❌ Payment initialization failed.");
+      await bot.sendMessage(chatId,
+"❌ Unable to initialize payment. Please try again later.");
     }
   }
 
-  // ===== ADMIN REPLY BUTTON =====
-  if (data.startsWith("reply_") && query.from.id === ADMIN_ID) {
-    const targetId = Number(data.split("_")[1]);
-    adminReplyTargets[ADMIN_ID] = targetId;
-
-    await bot.sendMessage(ADMIN_ID,
-"✍ Please type your reply message now.");
-  }
-
-  // ===== APPROVE =====
-  if (data.startsWith("approve_") && query.from.id === ADMIN_ID) {
+  // ADMIN CALLBACKS
+  if (query.from.id === ADMIN_ID) {
+    const data = query.data;
     const userId = Number(data.split("_")[1]);
-    users[userId].status = "approved";
 
-    await bot.sendMessage(userId,
-"🎉 *Congratulations!*\n\nYour registration has been approved.",
-{ parse_mode: "Markdown" });
-  }
+    if (data.startsWith("reply_")) {
+      adminReplyTarget = userId;
+      await bot.sendMessage(ADMIN_ID, "✍ Please type your reply message:");
+    }
 
-  // ===== REJECT =====
-  if (data.startsWith("reject_") && query.from.id === ADMIN_ID) {
-    const userId = Number(data.split("_")[1]);
-    users[userId].status = "reapply_required";
+    if (data.startsWith("approve_")) {
+      users[userId].status = "approved";
+      await bot.sendMessage(userId,
+"🎉 Congratulations! Your registration has been approved.");
+    }
 
-    await bot.sendMessage(userId,
-"❌ Your application was not approved.\nYou may reapply.");
+    if (data.startsWith("reject_")) {
+      users[userId].status = "reapply_required";
+      await bot.sendMessage(userId,
+"❌ Your registration was not approved. You may reapply.");
+    }
   }
 
   bot.answerCallbackQuery(query.id);
 });
-
 
 // ================= FEE LOGIC =================
 
 function getFee(user) {
   const hours = (Date.now() - user.createdAt) / (1000 * 60 * 60);
 
-  if (user.status === "reapply_required") {
-    user.penalty_applied = true;
+  if (user.status === "reapply_required" || hours > 24) {
+    user.penalty = true;
     return PRICING.PENALTY;
   }
 
-  if (hours > 24) {
-    user.penalty_applied = true;
-    return PRICING.PENALTY;
-  }
-
-  user.penalty_applied = false;
+  user.penalty = false;
   return PRICING.STANDARD;
 }
 
-
-// ================= WEBHOOK =================
+// ================= CHAPA WEBHOOK =================
 
 app.post("/verify", async (req, res) => {
   try {
     const { tx_ref } = req.body;
-
     if (!tx_ref || processedTransactions.has(tx_ref))
       return res.sendStatus(200);
 
     const verify = await axios.get(
       `https://api.chapa.co/v1/transaction/verify/${tx_ref}`,
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}`
-        }
-      }
+      { headers: { Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}` } }
     );
 
     const data = verify.data.data;
-
     if (data.status !== "success")
       return res.sendStatus(200);
 
-    const userId = Number(tx_ref.split("_")[2]);
-    const user = users[userId];
+    const telegramId = Number(tx_ref.split("_")[2]);
+    const user = users[telegramId];
     if (!user) return res.sendStatus(200);
-
-    if (user.status === "payment_verified" || user.status === "approved")
-      return res.sendStatus(200);
 
     processedTransactions.add(tx_ref);
 
     user.status = "payment_verified";
+    user.paidAmount = data.amount;
+    user.commission = data.amount * TEACHER_PERCENT;
 
-    await bot.sendMessage(userId,
-"✅ Payment verified successfully.\nYour application is now under review.");
+    await bot.sendMessage(telegramId,
+"✅ Payment verified successfully. Your application is now under review.");
 
     await bot.sendMessage(DB_CHANNEL,
 `📌 *New Paid Registration*
 
-ID: ${userId}
 Name: ${user.name}
 Phone: ${user.phone}
 Subject: ${user.subject}
-Penalty: ${user.penalty_applied ? "Yes" : "No"}`,
+Paid: ${user.paidAmount} ETB
+Commission (55%): ${user.commission} ETB`,
 {
   parse_mode: "Markdown",
   reply_markup: {
     inline_keyboard: [
       [
-        { text: "💬 Reply", callback_data: `reply_${userId}` },
-        { text: "✅ Approve", callback_data: `approve_${userId}` },
-        { text: "❌ Reject", callback_data: `reject_${userId}` }
+        { text: "💬 Reply", callback_data: `reply_${telegramId}` },
+        { text: "✅ Approve", callback_data: `approve_${telegramId}` },
+        { text: "❌ Reject", callback_data: `reject_${telegramId}` }
       ]
     ]
   }
@@ -294,7 +364,7 @@ Penalty: ${user.penalty_applied ? "Yes" : "No"}`,
   }
 });
 
-
 // ================= SERVER =================
 
-app.listen(3000, () => console.log("Server running on port 3000"));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
