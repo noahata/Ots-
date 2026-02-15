@@ -1,12 +1,11 @@
 require("dotenv").config();
-const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
+const express = require("express");
 const axios = require("axios");
 
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 const app = express();
 app.use(express.json());
-
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
 const ADMIN_ID = Number(process.env.ADMIN_ID);
 const DB_CHANNEL = process.env.DB_CHANNEL_ID;
@@ -17,37 +16,209 @@ const PRICING = {
 };
 
 let users = {};
-let teacherCounter = 0;
 let processedTransactions = new Set();
+let adminReplyTargets = {};
 
-/* ================= SERVER ================= */
 
-app.get("/", (req, res) => {
-  res.send("✅ Teacher Verification Bot Running");
+// ================= START COMMAND =================
+
+bot.onText(/\/start/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  users[chatId] = {
+    step: "name",
+    createdAt: Date.now(),
+    status: "collecting",
+    penalty_applied: false
+  };
+
+  await bot.sendMessage(chatId,
+`👋 *Welcome to DoctorET Registration Bot*
+
+We are pleased to have you join our teaching platform.
+
+Please enter your full legal name to begin registration.`,
+{ parse_mode: "Markdown" });
 });
 
-app.listen(process.env.PORT || 3000, () => {
-  console.log("🚀 Server Running...");
+
+// ================= MAIN MESSAGE HANDLER =================
+
+bot.on("message", async (msg) => {
+  const chatId = msg.chat.id;
+  const user = users[chatId];
+
+  // Admin reply system
+  if (msg.from.id === ADMIN_ID && adminReplyTargets[ADMIN_ID]) {
+    const target = adminReplyTargets[ADMIN_ID];
+
+    await bot.sendMessage(target,
+`📩 *Message from Administration*
+
+${msg.text}`,
+{ parse_mode: "Markdown" });
+
+    await bot.sendMessage(ADMIN_ID, "✅ Message delivered successfully.");
+    delete adminReplyTargets[ADMIN_ID];
+    return;
+  }
+
+  if (!user) return;
+
+  // ===== NAME STEP =====
+  if (user.step === "name") {
+    user.name = msg.text;
+    user.step = "phone";
+
+    return bot.sendMessage(chatId,
+`📱 *Phone Verification Required*
+
+For security purposes, please share your phone number using the button below.`,
+{
+  parse_mode: "Markdown",
+  reply_markup: {
+    keyboard: [
+      [{ text: "📲 Share Phone Number", request_contact: true }]
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: true
+  }
+});
+  }
+
+  // ===== PHONE STEP =====
+  if (user.step === "phone") {
+
+    if (!msg.contact) {
+      return bot.sendMessage(chatId,
+"⚠ Please use the provided button to share your phone number.");
+    }
+
+    user.phone = msg.contact.phone_number;
+    user.step = "subject";
+
+    return bot.sendMessage(chatId,
+`📚 *Subject Information*
+
+Please enter the subject you wish to teach.`,
+{
+  parse_mode: "Markdown",
+  reply_markup: { remove_keyboard: true }
+});
+  }
+
+  // ===== SUBJECT STEP =====
+  if (user.step === "subject") {
+    user.subject = msg.text;
+    user.step = "payment";
+
+    const fee = getFee(user);
+
+    return bot.sendMessage(chatId,
+`💳 *Registration Fee*
+
+Amount to Pay: ${fee} ETB
+
+Click below to proceed securely.`,
+{
+  parse_mode: "Markdown",
+  reply_markup: {
+    inline_keyboard: [
+      [{ text: "💰 Pay Now", callback_data: "pay_now" }]
+    ]
+  }
+});
+  }
 });
 
-/* ================= UTIL ================= */
 
-function generateTeacherId() {
-  teacherCounter++;
-  const year = new Date().getFullYear();
-  return `TCH-${year}-${String(teacherCounter).padStart(4, "0")}`;
-}
+// ================= PAYMENT BUTTON =================
+
+bot.on("callback_query", async (query) => {
+  const chatId = query.message.chat.id;
+  const user = users[chatId];
+  const data = query.data;
+
+  if (data === "pay_now") {
+
+    const fee = getFee(user);
+    const tx_ref = `docoret_${Date.now()}_${chatId}`;
+
+    try {
+      const response = await axios.post(
+        "https://api.chapa.co/v1/transaction/initialize",
+        {
+          amount: fee,
+          currency: "ETB",
+          email: `${chatId}@docoret.com`,
+          tx_ref,
+          callback_url: `${process.env.BASE_URL}/verify`
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}`
+          }
+        }
+      );
+
+      const checkout = response.data.data.checkout_url;
+
+      user.status = "pending_payment";
+
+      await bot.sendMessage(chatId,
+`🔐 Click below to complete payment securely:
+
+${checkout}`);
+
+    } catch (err) {
+      console.log(err.message);
+      await bot.sendMessage(chatId, "❌ Payment initialization failed.");
+    }
+  }
+
+  // ===== ADMIN REPLY BUTTON =====
+  if (data.startsWith("reply_") && query.from.id === ADMIN_ID) {
+    const targetId = Number(data.split("_")[1]);
+    adminReplyTargets[ADMIN_ID] = targetId;
+
+    await bot.sendMessage(ADMIN_ID,
+"✍ Please type your reply message now.");
+  }
+
+  // ===== APPROVE =====
+  if (data.startsWith("approve_") && query.from.id === ADMIN_ID) {
+    const userId = Number(data.split("_")[1]);
+    users[userId].status = "approved";
+
+    await bot.sendMessage(userId,
+"🎉 *Congratulations!*\n\nYour registration has been approved.",
+{ parse_mode: "Markdown" });
+  }
+
+  // ===== REJECT =====
+  if (data.startsWith("reject_") && query.from.id === ADMIN_ID) {
+    const userId = Number(data.split("_")[1]);
+    users[userId].status = "reapply_required";
+
+    await bot.sendMessage(userId,
+"❌ Your application was not approved.\nYou may reapply.");
+  }
+
+  bot.answerCallbackQuery(query.id);
+});
+
+
+// ================= FEE LOGIC =================
 
 function getFee(user) {
-  const now = Date.now();
-  const hours = (now - user.createdAt) / (1000 * 60 * 60);
+  const hours = (Date.now() - user.createdAt) / (1000 * 60 * 60);
 
   if (user.status === "reapply_required") {
     user.penalty_applied = true;
     return PRICING.PENALTY;
   }
 
-  if (user.status === "pending_payment" && hours > 24) {
+  if (hours > 24) {
     user.penalty_applied = true;
     return PRICING.PENALTY;
   }
@@ -56,47 +227,15 @@ function getFee(user) {
   return PRICING.STANDARD;
 }
 
-async function createPayment(user, amount) {
-  const tx_ref = "tx_" + Date.now() + "_" + user.telegram_id;
 
-  const response = await axios.post(
-    "https://api.chapa.co/v1/transaction/initialize",
-    {
-      amount,
-      currency: "ETB",
-      email: user.email,
-      first_name: user.full_name,
-      phone_number: user.phone,
-      tx_ref,
-      callback_url: `${process.env.BASE_URL}/verify`,
-      return_url: `https://t.me/`,
-      customization: {
-        title: "Teacher Registration",
-        description: "Instructor Verification Fee"
-      }
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}`
-      }
-    }
-  );
-
-  return response.data.data.checkout_url;
-}
-
-/* ================= WEBHOOK ================= */
+// ================= WEBHOOK =================
 
 app.post("/verify", async (req, res) => {
   try {
     const { tx_ref } = req.body;
-    if (!tx_ref) return res.sendStatus(400);
 
-    // Duplicate protection
-    if (processedTransactions.has(tx_ref)) {
-      console.log("⚠ Duplicate tx ignored:", tx_ref);
+    if (!tx_ref || processedTransactions.has(tx_ref))
       return res.sendStatus(200);
-    }
 
     const verify = await axios.get(
       `https://api.chapa.co/v1/transaction/verify/${tx_ref}`,
@@ -109,166 +248,53 @@ app.post("/verify", async (req, res) => {
 
     const data = verify.data.data;
 
-    if (data.status !== "success") {
+    if (data.status !== "success")
       return res.sendStatus(200);
-    }
 
-    const telegramId = Number(tx_ref.split("_")[2]);
-    const user = users[telegramId];
+    const userId = Number(tx_ref.split("_")[2]);
+    const user = users[userId];
     if (!user) return res.sendStatus(200);
 
-    // Prevent double processing
-    if (user.status === "payment_verified" || user.status === "approved") {
+    if (user.status === "payment_verified" || user.status === "approved")
       return res.sendStatus(200);
-    }
 
     processedTransactions.add(tx_ref);
 
     user.status = "payment_verified";
-    user.payment_tx = tx_ref;
-    user.paid_amount = data.amount;
-    user.paid_at = new Date().toISOString();
 
-    await bot.sendMessage(
-      telegramId,
-      "✅ Payment Verified!\nYour application is now under review."
-    );
-
-    await bot.sendMessage(
-      DB_CHANNEL,
-      `📌 Payment Verified\nUser: ${telegramId}\nAmount: ${data.amount}\nPenalty: ${user.penalty_applied ? "Yes" : "No"}`
-    );
+    await bot.sendMessage(userId,
+"✅ Payment verified successfully.\nYour application is now under review.");
 
     await bot.sendMessage(DB_CHANNEL,
-      "Approve or Reject?",
-      {
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: "✅ Approve", callback_data: `approve_${telegramId}` },
-              { text: "❌ Reject", callback_data: `reject_${telegramId}` }
-            ]
-          ]
-        }
-      }
-    );
+`📌 *New Paid Registration*
+
+ID: ${userId}
+Name: ${user.name}
+Phone: ${user.phone}
+Subject: ${user.subject}
+Penalty: ${user.penalty_applied ? "Yes" : "No"}`,
+{
+  parse_mode: "Markdown",
+  reply_markup: {
+    inline_keyboard: [
+      [
+        { text: "💬 Reply", callback_data: `reply_${userId}` },
+        { text: "✅ Approve", callback_data: `approve_${userId}` },
+        { text: "❌ Reject", callback_data: `reject_${userId}` }
+      ]
+    ]
+  }
+});
 
     res.sendStatus(200);
 
   } catch (err) {
-    console.log("Webhook Error:", err.message);
+    console.log(err.message);
     res.sendStatus(500);
   }
 });
 
-/* ================= START ================= */
 
-bot.onText(/\/start/, (msg) => {
-  const chatId = msg.chat.id;
+// ================= SERVER =================
 
-  users[chatId] = {
-    telegram_id: chatId,
-    status: "collecting",
-    step: 1,
-    createdAt: Date.now()
-  };
-
-  bot.sendMessage(chatId,
-    "🎓 *Instructor Verification Gateway*\n\nEnter Full Name:",
-    { parse_mode: "Markdown" }
-  );
-});
-
-/* ================= REGISTRATION FLOW ================= */
-
-bot.on("message", async (msg) => {
-  const chatId = msg.chat.id;
-  const user = users[chatId];
-  if (!user || !msg.text) return;
-
-  if (user.step === 1) {
-    user.full_name = msg.text;
-    user.step = 2;
-    return bot.sendMessage(chatId, "📧 Enter Email:");
-  }
-
-  if (user.step === 2) {
-    user.email = msg.text;
-    user.step = 3;
-    return bot.sendMessage(chatId, "📱 Enter Phone:");
-  }
-
-  if (user.step === 3) {
-    user.phone = msg.text;
-    user.status = "pending_payment";
-    user.step = 0;
-
-    const fee = getFee(user);
-    const link = await createPayment(user, fee);
-
-    return bot.sendMessage(chatId,
-      `💳 Registration Fee: ${fee} ETB`,
-      {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: `💳 Pay ${fee} ETB`, url: link }]
-          ]
-        }
-      }
-    );
-  }
-});
-
-/* ================= ADMIN ACTION ================= */
-
-bot.on("callback_query", async (q) => {
-  if (q.from.id !== ADMIN_ID) return;
-
-  const telegramId = Number(q.data.split("_")[1]);
-  const user = users[telegramId];
-  if (!user) return;
-
-  if (q.data.startsWith("approve_")) {
-    const teacherId = generateTeacherId();
-    user.status = "approved";
-    user.teacher_id = teacherId;
-
-    await bot.sendMessage(
-      telegramId,
-      `🎉 Approved!\n\nYour Teacher ID: ${teacherId}\nYou can now use /dashboard`
-    );
-
-    bot.editMessageText("✅ Approved", {
-      chat_id: q.message.chat.id,
-      message_id: q.message.message_id
-    });
-  }
-
-  if (q.data.startsWith("reject_")) {
-    user.status = "reapply_required";
-
-    await bot.sendMessage(
-      telegramId,
-      "❌ Application rejected.\nReapply with 149 ETB."
-    );
-
-    bot.editMessageText("❌ Rejected", {
-      chat_id: q.message.chat.id,
-      message_id: q.message.message_id
-    });
-  }
-});
-
-/* ================= DASHBOARD ================= */
-
-bot.onText(/\/dashboard/, (msg) => {
-  const user = users[msg.chat.id];
-
-  if (!user || user.status !== "approved") {
-    return bot.sendMessage(msg.chat.id, "🚫 Access Restricted.");
-  }
-
-  bot.sendMessage(msg.chat.id,
-    `📊 Dashboard\n\nID: ${user.teacher_id}\nStatus: Active`
-  );
-});
+app.listen(3000, () => console.log("Server running on port 3000"));
